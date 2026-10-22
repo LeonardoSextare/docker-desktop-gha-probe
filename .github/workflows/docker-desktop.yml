@@ -1,0 +1,117 @@
+name: docker-desktop
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  INSTALLER_URL: https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe
+  DOCKER_BIN: C:\Program Files\Docker\Docker\resources\bin
+
+jobs:
+  docker-desktop:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Host summary
+        shell: pwsh
+        run: |
+          $env:WSL_UTF8 = '1'
+          "ImageVersion=$env:ImageVersion"
+          (Get-CimInstance Win32_Processor).Name
+          Get-HotFix | Format-Table HotFixID, InstalledOn -AutoSize | Out-String
+          wsl --version
+          "USERNAME=$env:USERNAME"
+          whoami /groups | Select-String 'Administrators|Mandatory Label'
+
+      - name: Download installer
+        shell: pwsh
+        run: |
+          $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+          Invoke-WebRequest -Uri $env:INSTALLER_URL -OutFile "$env:RUNNER_TEMP\DockerDesktopInstaller.exe"
+          $stopwatch.Stop()
+          $file = Get-Item "$env:RUNNER_TEMP\DockerDesktopInstaller.exe"
+          "Size: {0:N0} MB" -f ($file.Length / 1MB)
+          "Version: $($file.VersionInfo.ProductVersion)"
+          "Download time: {0:N1} s" -f $stopwatch.Elapsed.TotalSeconds
+
+      - name: Reboot flags before install
+        shell: pwsh
+        run: ./scripts/reboot-flags.ps1
+
+      - name: Install
+        shell: pwsh
+        run: |
+          $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+          $process = Start-Process -FilePath "$env:RUNNER_TEMP\DockerDesktopInstaller.exe" -Wait -PassThru `
+              -ArgumentList 'install', '--quiet', '--accept-license', '--backend=wsl-2'
+          $stopwatch.Stop()
+          "Installer exit code: $($process.ExitCode)   (3010 = restart required)"
+          "Install time: {0:N1} s" -f $stopwatch.Elapsed.TotalSeconds
+          net localgroup docker-users
+          # The installer changes the machine PATH, but this job keeps the PATH it started with.
+          Add-Content -Path $env:GITHUB_PATH -Value $env:DOCKER_BIN
+          # Explicit exit: otherwise the step ends with the exit code of the last native command.
+          if ($process.ExitCode -notin 0, 3010) { exit $process.ExitCode } else { exit 0 }
+
+      - name: Reboot flags after install
+        shell: pwsh
+        run: ./scripts/reboot-flags.ps1
+
+      - name: Start Docker Desktop and wait for the Linux engine
+        shell: pwsh
+        run: |
+          Get-Command docker -All | Format-Table Source -AutoSize | Out-String
+          Start-Process -FilePath 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+          $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+          $osType = $null
+          while ($stopwatch.Elapsed.TotalMinutes -lt 10) {
+              $osType = docker info --format '{{.OSType}}' 2>&1
+              if ($osType -eq 'linux') { break }
+              "{0,5:N0} s: {1}" -f $stopwatch.Elapsed.TotalSeconds, ($osType | Out-String).Trim()
+              Start-Sleep -Seconds 10
+          }
+          "Engine ready check: OSType=$osType after {0:N1} s" -f $stopwatch.Elapsed.TotalSeconds
+          docker context ls
+          docker version
+          wsl --list --verbose
+          if ($osType -ne 'linux') { throw 'Linux engine did not start' }
+
+      - name: Tests (PowerShell 7)
+        shell: pwsh
+        run: ./scripts/docker-tests.ps1 -ResultFile "$env:RUNNER_TEMP\results.md"
+
+      - name: Tests (Windows PowerShell 5.1)
+        if: success() || failure()
+        shell: powershell
+        run: ./scripts/docker-tests.ps1 -ResultFile "$env:RUNNER_TEMP\results.md"
+
+      - name: Results table
+        if: always()
+        shell: pwsh
+        run: |
+          $table = "| Shell | Test | Result | Seconds |`n|---|---|---|---|`n"
+          if (Test-Path "$env:RUNNER_TEMP\results.md") { $table += Get-Content "$env:RUNNER_TEMP\results.md" -Raw }
+          $table
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $table
+
+      - name: Collect Docker Desktop logs
+        if: always()
+        shell: pwsh
+        run: |
+          $logFolder = "$env:RUNNER_TEMP\docker-logs"
+          New-Item -ItemType Directory -Force -Path $logFolder | Out-Null
+          Copy-Item "$env:ProgramData\DockerDesktop\*.txt" $logFolder -ErrorAction SilentlyContinue
+          Copy-Item "$env:LOCALAPPDATA\Docker\log" "$logFolder\localappdata-log" -Recurse -ErrorAction SilentlyContinue
+          Get-ChildItem $logFolder -Recurse -File | Format-Table FullName, Length -AutoSize | Out-String -Width 300
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: docker-desktop-logs-${{ github.run_id }}
+          path: ${{ runner.temp }}/docker-logs
+          if-no-files-found: warn
