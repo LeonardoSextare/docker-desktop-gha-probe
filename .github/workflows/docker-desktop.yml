@@ -62,16 +62,29 @@ jobs:
         shell: pwsh
         run: ./scripts/reboot-flags.ps1
 
+      # The preinstalled Windows engine owns \\.\pipe\docker_engine, which Docker Desktop
+      # needs for its API proxy; with it running, the Docker Desktop backend crashes.
+      - name: Stop the preinstalled Windows engine
+        shell: pwsh
+        run: |
+          Stop-Service -Name docker
+          Set-Service -Name docker -StartupType Disabled
+          Get-Service -Name docker | Format-Table Name, Status, StartType -AutoSize | Out-String
+          "docker_engine pipe exists: $(Test-Path '\\.\pipe\docker_engine')"
+
       - name: Start Docker Desktop and wait for the Linux engine
         shell: pwsh
         run: |
           Get-Command docker -All | Format-Table Source -AutoSize | Out-String
           Start-Process -FilePath 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+          $backendLog = "$env:LOCALAPPDATA\Docker\log\host\com.docker.backend.exe.log"
           $stopwatch = [Diagnostics.Stopwatch]::StartNew()
           $osType = $null
           while ($stopwatch.Elapsed.TotalMinutes -lt 10) {
               $osType = docker info --format '{{.OSType}}' 2>&1
               if ($osType -eq 'linux') { break }
+              $crash = Select-String -Path $backendLog -Pattern 'backend crashed' -ErrorAction SilentlyContinue
+              if ($crash) { throw "Docker Desktop backend crashed: $($crash[0].Line)" }
               "{0,5:N0} s: {1}" -f $stopwatch.Elapsed.TotalSeconds, ($osType | Out-String).Trim()
               Start-Sleep -Seconds 10
           }
