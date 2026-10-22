@@ -1,0 +1,80 @@
+name: winplaybook-poc
+
+on:
+  workflow_dispatch:
+    inputs:
+      winplaybook-ref:
+        description: WinPlaybook commit to test
+        default: 31c4691064e7f68962cd41ebddb92fe5c3620111
+
+permissions:
+  contents: read
+
+env:
+  INSTALLER_URL: https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe
+  DOCKER_BIN: C:\Program Files\Docker\Docker\resources\bin
+
+jobs:
+  poc:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: LeonardoSextare/WinPlaybook
+          ref: ${{ inputs.winplaybook-ref }}
+          path: winplaybook
+
+      - name: Host summary
+        shell: pwsh
+        run: |
+          "ImageVersion=$env:ImageVersion"
+          (Get-CimInstance Win32_Processor).Name
+          git -C winplaybook log --oneline -1
+
+      - name: Install Docker Desktop
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:INSTALLER_URL -OutFile "$env:RUNNER_TEMP\DockerDesktopInstaller.exe"
+          $process = Start-Process -FilePath "$env:RUNNER_TEMP\DockerDesktopInstaller.exe" -Wait -PassThru `
+              -ArgumentList 'install', '--quiet', '--accept-license', '--backend=wsl-2'
+          "Installer exit code: $($process.ExitCode)"
+          # The installer changes the machine PATH, but this job keeps the PATH it started with.
+          Add-Content -Path $env:GITHUB_PATH -Value $env:DOCKER_BIN
+          if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+
+      # The preinstalled Windows engine owns \\.\pipe\docker_engine, which Docker Desktop
+      # needs for its API proxy; with it running, the Docker Desktop backend crashes.
+      - name: Stop the preinstalled Windows engine
+        shell: pwsh
+        run: |
+          Stop-Service -Name docker
+          Set-Service -Name docker -StartupType Disabled
+
+      - name: Start Docker Desktop and wait for the Linux engine
+        shell: pwsh
+        run: |
+          Start-Process -FilePath 'C:\Program Files\Docker\Docker\Docker Desktop.exe'
+          $backendLog = "$env:LOCALAPPDATA\Docker\log\host\com.docker.backend.exe.log"
+          $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+          $osType = $null
+          while ($stopwatch.Elapsed.TotalMinutes -lt 10) {
+              $osType = docker info --format '{{.OSType}}' 2>&1
+              if ($osType -eq 'linux') { break }
+              $crash = Select-String -Path $backendLog -Pattern 'backend crashed' -ErrorAction SilentlyContinue
+              if ($crash) { throw "Docker Desktop backend crashed: $($crash[0].Line)" }
+              Start-Sleep -Seconds 10
+          }
+          "Engine ready check: OSType=$osType after {0:N1} s" -f $stopwatch.Elapsed.TotalSeconds
+          if ($osType -ne 'linux') { throw 'Linux engine did not start' }
+
+      - name: WinPlaybook (PowerShell 7)
+        shell: pwsh
+        run: ./scripts/winplaybook-poc.ps1 -RepositoryPath "$env:GITHUB_WORKSPACE\winplaybook"
+
+      - name: WinPlaybook (Windows PowerShell 5.1)
+        if: success() || failure()
+        shell: powershell
+        run: ./scripts/winplaybook-poc.ps1 -RepositoryPath "$env:GITHUB_WORKSPACE\winplaybook"
