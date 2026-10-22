@@ -5,7 +5,11 @@ param(
     [string] $RepositoryPath
 )
 
-$ErrorActionPreference = 'Continue'
+# GitHub's shell wrapper sets 'Stop' in the global scope, and module functions
+# read the global value, not this script's. On Windows PowerShell 5.1, 'Stop'
+# turns the first stderr line of docker (an Ansible warning) into a terminating
+# NativeCommandError when the output is redirected with 2>&1.
+$global:ErrorActionPreference = 'Continue'
 $failedCount = 0
 
 function Invoke-Check {
