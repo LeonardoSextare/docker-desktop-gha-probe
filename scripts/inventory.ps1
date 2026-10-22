@@ -36,8 +36,11 @@ Write-Section 'Runner image' {
 }
 
 Write-Section 'OS version' {
-    [Environment]::OSVersion
-    Get-ComputerInfo -Property OsName, OsVersion, OsBuildNumber, WindowsVersion, OsDisplayVersion, WindowsEditionId, OsArchitecture
+    # Format-List on each object: a single table for objects of different
+    # types prints the second one as empty lines.
+    [Environment]::OSVersion | Format-List
+    Get-ComputerInfo -Property OsName, OsVersion, OsBuildNumber, WindowsVersion, OsDisplayVersion, WindowsEditionId, OsArchitecture |
+        Format-List
 }
 
 Write-Section 'CPU' {
@@ -59,7 +62,7 @@ Write-Section 'Disk' {
 }
 
 Write-Section 'Hyper-V info (Get-ComputerInfo)' {
-    Get-ComputerInfo -Property HyperV*
+    Get-ComputerInfo -Property HyperV* | Format-List
 }
 
 Write-Section 'systeminfo' { systeminfo }
