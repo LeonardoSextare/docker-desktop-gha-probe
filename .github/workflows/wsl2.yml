@@ -1,0 +1,52 @@
+name: wsl2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wsl2:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Host summary
+        shell: pwsh
+        run: |
+          $env:WSL_UTF8 = '1'
+          "ImageVersion=$env:ImageVersion"
+          (Get-CimInstance Win32_Processor).Name
+          Get-HotFix | Format-Table HotFixID, InstalledOn -AutoSize | Out-String
+          wsl --version
+
+      # The preinstalled engine is a Windows engine; record what it does with a Linux image.
+      - name: Linux image on the preinstalled Windows engine
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          docker info --format 'OSType={{.OSType}}'
+          docker run --rm alpine uname -a
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7.2.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+
+      - name: Kernel inside the distribution
+        shell: wsl-bash {0}
+        run: |
+          uname -a
+          cat /proc/version
+
+      - name: Check it is WSL2
+        shell: pwsh
+        run: |
+          $env:WSL_UTF8 = '1'
+          wsl --list --verbose
+          $kernel = wsl --distribution Ubuntu-24.04 --exec uname -r
+          "uname -r = $kernel"
+          if ($kernel -notmatch 'microsoft-standard-WSL2') {
+              throw "Not WSL2: '$kernel'"
+          }
